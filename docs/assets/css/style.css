@@ -174,8 +174,8 @@ a:hover { text-decoration: underline; }
 
 /* ---- Callout boxes ---- */
 .callout {
-  background: var(--surface);
-  border-left: 2px solid var(--text);
+  background: #f0fdf4;
+  border-left: 2px solid #16a34a;
   border-radius: 0 6px 6px 0;
   padding: 16px 20px;
   margin: 28px 0;
@@ -183,7 +183,8 @@ a:hover { text-decoration: underline; }
 }
 
 .callout.idea {
-  border-left-color: #6b6b6b;
+  background: #eff6ff;
+  border-left-color: #2563eb;
 }
 
 .callout-label {
@@ -191,8 +192,12 @@ a:hover { text-decoration: underline; }
   font-weight: 600;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: var(--text-muted);
+  color: #16a34a;
   margin-bottom: 5px;
+}
+
+.callout.idea .callout-label {
+  color: #2563eb;
 }
 
 /* ---- Inline code ---- */
