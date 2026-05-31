@@ -1,0 +1,32 @@
+# Checkpoints — download from Modal volume instead
+*.pt
+*.pth
+image_index.pt
+caption_index*.pt
+
+# Loose result PNGs in root
+result_*.png
+recall_results_*.txt
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.env
+
+# Conda / venv
+.conda/
+venv/
+env/
+
+# Weights & Biases
+wandb/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# macOS
+.DS_Store
+
+# Downloaded datasets (regenerate with modal run)
+/tmp/

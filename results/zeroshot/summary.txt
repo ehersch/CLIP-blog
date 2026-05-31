@@ -1,0 +1,8 @@
+Zero-shot classification results
+==================================================
+Model     Dataset       Top-1       Top-5
+--------------------------------------------------
+small     cifar100      Top-1=1.71%  Top-5=7.79%
+small     food101       Top-1=1.11%  Top-5=4.89%
+large     cifar100      Top-1=2.59%  Top-5=10.91%
+large     food101       Top-1=1.17%  Top-5=4.78%

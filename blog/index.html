@@ -1,0 +1,705 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Reproducing CLIP from Scratch</title>
+  <meta name="description" content="A from-scratch reproduction of OpenAI's CLIP using DistilBert and ResNet50, trained on Flickr30k with contrastive loss." />
+
+  <!-- Fonts -->
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+
+  <link rel="stylesheet" href="assets/css/style.css" />
+
+  <!-- MathJax for LaTeX equations -->
+  <script>
+    window.MathJax = {
+      tex: { inlineMath: [['$','$']], displayMath: [['$$','$$']] },
+      options: { skipHtmlTags: ['script','noscript','style','textarea','pre'] }
+    };
+  </script>
+  <script src="https://cdn.jsdelivr.net/npm/mathjax@3/es5/tex-chtml.js" async></script>
+</head>
+<body>
+
+  <!-- Reading progress -->
+  <div id="progress-bar"></div>
+
+  <div class="container">
+
+    <!-- ================================================================
+         HEADER
+    ================================================================ -->
+    <header class="post-header">
+      <div class="post-tag">Deep Learning · Reproduction</div>
+
+      <h1 class="post-title">
+        Reproducing CLIP from Scratch
+      </h1>
+
+      <p class="post-subtitle">
+        A from-scratch reproduction of OpenAI's CLIP <a href="#ref-clip" class="cite">[1]</a>
+        — trained on Flickr30k using a T5-small + ResNet-18 (small) and DistilBERT + ResNet-50
+        (large) for a few dollars on a single GPU.
+
+        I find this may be my new favorite way to understand a paper.
+      </p>
+
+      <div class="post-meta">
+        <div class="author">
+          <div class="author-avatar"><img src="github_pic.png" alt="Ethan Hersch" style="width:28px;height:28px;border-radius:50%;object-fit:cover;display:block;" /></div>
+          <span>Ethan Hersch</span>
+        </div>
+        <span class="sep">·</span>
+        <span class="date">May 2026</span>
+        <span class="sep">·</span>
+        <span class="read-time">~15 min read</span>
+      </div>
+    </header>
+
+    <!-- ================================================================
+         HERO FIGURE
+         Drop your best retrieval result or similarity matrix here
+    ================================================================ -->
+    <figure class="hero-figure">
+      <img src="results/large/t2i_a_soccer_player_kicking_a_ball.png"
+           alt="CLIP retrieval results — text query matched to images" />
+      <figcaption>
+        Text → image retrieval after training. Given the query <em>"a soccer player kicking a ball"</em>,
+        the model retrieves the most semantically similar images from Flickr30k.
+      </figcaption>
+    </figure>
+
+    <!-- ================================================================
+         TABLE OF CONTENTS
+    ================================================================ -->
+    <nav class="toc">
+      <div class="toc-title">Contents</div>
+      <ol>
+        <li><a href="#background">Background &amp; Motivation</a></li>
+        <li><a href="#architecture">Model Architecture</a></li>
+        <li><a href="#loss">Contrastive Loss</a></li>
+        <li><a href="#data">Dataset &amp; Training Setup</a></li>
+        <li><a href="#results">Results</a></li>
+        <!-- <li><a href="#similarity">Embedding Space</a></li> -->
+        <li><a href="#retrieval">Retrieval Examples</a></li>
+        <li><a href="#failures">Failure Cases</a></li>
+        <li><a href="#takeaways">Takeaways</a></li>
+      </ol>
+    </nav>
+
+    <!-- ================================================================
+         ARTICLE
+    ================================================================ -->
+    <article>
+
+      <!-- ---- 1. Background ----------------------------------------- -->
+      <h2 id="background">
+        Background &amp; Motivation
+      </h2>
+
+      <p>
+        CLIP-based models are everywhere. They power image search, multimodal AI assistants,
+        and zero-shot classifiers. They work by training a joint embedding space between images
+        and text, so that a photo of a dog and the phrase <em>"a dog playing in the snow"</em>
+        end up at the same point in vector space. The original paper achieves this at massive
+        scale: 400 million image-text pairs scraped from the internet, vision transformers with
+        hundreds of millions of parameters, and weeks of compute across hundreds of GPUs.
+      </p>
+      <p>
+        I wanted to understand the mechanism from the inside by training a version myself. There is a gap between understanding what a model does and understanding
+        <em>why</em> it works, and that gap only closes when you directly experiment with it. Unfortunately,
+        I do not have a data center. But I do have Modal credits. This reproduction uses the
+        much more tractable Flickr30k dataset, off-the-shelf
+        pretrained encoders, and costs a few dollars end-to-end on a single GPU. The goal is
+        not to match OpenAI's numbers, and I don't expect this with my resources. I want to build real intuition for what contrastive
+        learning is actually doing and show that the tooling available today makes
+        reproducing landmark papers incredibly accessible.
+      </p>
+
+      <blockquote class="pull-quote">
+        <p>There is a gap between understanding what a model does and understanding why it works. That gap only closes when you directly experiment with it.</p>
+      </blockquote>
+
+      <p>
+        The original CLIP paper <a href="#ref-clip" class="cite">[1]</a> by Radford et al. (2021)
+        demonstrated that a model trained on 400M image-text pairs from the internet could
+        match the zero-shot accuracy of a supervised ResNet-50 <a href="#ref-resnet" class="cite">[3]</a>
+        on ImageNet, all without seeing a single labeled ImageNet example. The key ingredient
+        is <strong>contrastive learning</strong>: instead of predicting a fixed set of class labels,
+        the model learns a joint embedding space where matching image-text pairs are close together
+        and non-matching pairs are far apart. This relies on self-supervised learning where no additional human supervision is needed as our data already has text captions.
+      </p>
+
+      <div class="callout">
+        <div class="callout-label">Why?</div>
+        The model is never told what a "dog" or a "beach" is. It only sees pairs (an image and
+        a description) and learns that they should live nearby in embedding space. Everything
+        else follows from that single objective.
+      </div>
+
+      <h3>What is contrastive learning?</h3>
+
+      <p>
+        Standard supervised models learn a mapping from inputs to a fixed set of labels.
+        CLIP takes a different approach: it learns a <em>shared embedding space</em> for images and text. Both encoders independently compress their
+        input into a vector of the same dimension. The training objective asks 
+        given a batch of $N$ image-text pairs, can you tell which image belongs to which caption?
+      </p>
+
+      <figure>
+        <img src="contrastive_demo.png"
+             alt="Before and after contrastive training — matched pairs cluster together" />
+        <figcaption>
+          Imagine one batch is these 5 examples. Before training (left), image and text embeddings are scattered with no structure.
+          After training (right), matched pairs pull together while unmatched pairs stay apart.
+        </figcaption>
+      </figure>
+
+      <p>
+        These comparisons are being made across all image-text pairs in a batch of data. <strong>As an exercise, think about how training batch size affects performance of this model</strong>. After training on enough pairs,
+        the embedding space develops a rich geometry so we can relate images and text.
+      </p>
+
+      <h3>The training objective</h3>
+
+      <p>
+        In each training step, we sample a batch of $N$ image-text pairs and compute all
+        $N^2$ cosine similarities between image and text embeddings, forming an $N\times N$ matrix.
+        The diagonal entries are the correct (positive) pairs; everything else is a negative.
+        The loss asks the model to assign the highest similarity to each correct pair, for both images and text.
+      </p>
+
+      <p>
+        The best way to see this working is to watch the similarity matrix evolve during
+        actual training. Each snapshot below is taken from my reproduction.
+      </p>
+
+      <figure>
+        <div class="sim-mat-row">
+          <div class="sim-mat-cell">
+            <img src="sim_mat_beg.png" alt="Similarity matrix — beginning of training" />
+            <p><strong>Beginning</strong>: uniform noise, diagonal indistinguishable.</p>
+          </div>
+          <div class="sim-mat-cell">
+            <img src="sim_mat_mid.png" alt="Similarity matrix — mid training" />
+            <p><strong>Mid-training</strong>: diagonal starts to emerge.</p>
+          </div>
+          <div class="sim-mat-cell">
+            <img src="sim_mat_end.png" alt="Similarity matrix — end of training" />
+            <p><strong>End of training</strong>: diagonal clearly dominant.</p>
+          </div>
+        </div>
+        <figcaption>
+          The similarity matrix at three points during training. Positive pairs (diagonal) are
+          pulled up while negatives are pushed down. The loss
+          <a href="#ref-clip" class="cite">[1]</a> minimizes exactly this gap.
+        </figcaption>
+      </figure>
+
+      <!-- ---- 2. Architecture --------------------------------------- -->
+      <h2 id="architecture">
+        Model Architecture
+      </h2>
+
+      <p>
+        Rather than training encoders from scratch — which requires hundreds of millions of
+        pairs to work — I use pretrained architectures for each modality and let the
+        contrastive objective teach them to agree on a shared coordinate system.
+      </p>
+
+      <p>
+        For images, I use ResNet <a href="#ref-resnet" class="cite">[3]</a> — a deep
+        convolutional network built around residual connections. ResNet-18 and ResNet-50 are
+        both pretrained on ImageNet, giving them rich visual representations out of the box.
+        I replace the final classification head with a linear projection so the network outputs
+        an embedding vector instead of class logits. Both encoders remain trainable throughout,
+        so they fine-tune to the contrastive objective while retaining their pretrained features.
+      </p>
+
+      <p>
+        For text, the small model uses T5-small <a href="#ref-t5" class="cite">[5]</a>
+        (encoder only — the decoder is discarded) and the large model uses DistilBERT
+        <a href="#ref-distilbert" class="cite">[4]</a>, a distilled version of BERT that
+        retains 97% of its performance at 40% fewer parameters. Both are bidirectional
+        transformers: every token attends to every other token in both directions, so
+        mean-pooling over the final layer gives a genuinely global sentence representation.
+        This is a deliberate departure from the original CLIP, which uses a GPT-style
+        causal (left-to-right) encoder. That architecture works well when training from
+        scratch on 400M pairs — the model can learn to compress full sentence meaning into
+        the last token. With pretrained weights it's a worse fit, since those weights were
+        trained to predict the next word, not summarize a sentence.
+      </p>
+
+      <figure>
+        <img src="model_arch_new.png"
+             alt="One training step: image and text encoders feed into contrastive loss" />
+        <figcaption>
+          One training step. The image and text encoders independently produce embeddings,
+          which are L2-normalized and projected into the shared space. Their dot products,
+          scaled by the learnable temperature τ, form the logits fed into the symmetric loss.
+        </figcaption>
+      </figure>
+
+      <p>
+        After encoding, a <strong>linear projection head</strong> (no bias) maps each encoder's
+        output into a shared embedding space (256 dimensions for the small model and 512 for
+        the large). Both embeddings are then <strong>L2-normalized</strong>: each vector
+        is divided by its own magnitude so it lies on a unit hypersphere. This makes their dot
+        product equal to cosine similarity, so similarity looks at the direction of embeddings.
+      </p>
+
+      <p>
+        Finally, the similarities are scaled by a learnable <strong>temperature parameter
+        $\tau$</strong>. A small $\tau$
+        sharpens the softmax distribution, so the model becomes more decisive about which pair
+        is correct. A large $\tau$ makes the distribution more uniform and thus the loss more forgiving.
+      </p>
+<!-- 
+      <table class="arch-table">
+        <thead>
+          <tr>
+            <th>Component</th>
+            <th>Choice</th>
+            <th>Params</th>
+            <th>Notes</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>Text encoder (small)</td>
+            <td>T5-small encoder <a href="#ref-t5" class="cite">[5]</a></td>
+            <td>~35M</td>
+            <td>Pretrained; mean-pool over token embeddings → linear projection</td>
+          </tr>
+          <tr>
+            <td>Text encoder (large)</td>
+            <td>DistilBERT <a href="#ref-distilbert" class="cite">[4]</a></td>
+            <td>~66M</td>
+            <td>Pretrained; mean-pool over token embeddings → linear projection</td>
+          </tr>
+          <tr>
+            <td>Image encoder (small)</td>
+            <td>ResNet-18 <a href="#ref-resnet" class="cite">[3]</a></td>
+            <td>~11M</td>
+            <td>Pretrained on ImageNet; FC layer replaced with projection head</td>
+          </tr>
+          <tr>
+            <td>Image encoder (large)</td>
+            <td>ResNet-50 <a href="#ref-resnet" class="cite">[3]</a></td>
+            <td>~23M</td>
+            <td>Pretrained on ImageNet; FC layer replaced with projection head</td>
+          </tr>
+          <tr>
+            <td>Projection heads</td>
+            <td>Linear (bias-free)</td>
+            <td>~0.5M</td>
+            <td>Both encoders → shared 256-dim / 512-dim embedding space</td>
+          </tr>
+          <tr>
+            <td>Temperature τ</td>
+            <td>Learnable log-scalar</td>
+            <td>1 param</td>
+            <td>Init 0.07, clipped to prevent logits &gt; 100 <a href="#ref-clip" class="cite">[1]</a></td>
+          </tr>
+        </tbody>
+      </table> -->
+
+      <!-- ---- 3. Loss ----------------------------------------------- -->
+      <h2 id="loss">
+        Contrastive Loss
+      </h2>
+
+      <p>
+        The fundamental mechanism of this paper is a contrastive learning function, which moves similar data pairs close together in some embedding
+        space and pushes unrelated examples far apart.
+      </p>
+
+      <p>
+        For a batch of $N$ image-text pairs, let $\mathbf{I}_i$ and $\mathbf{T}_i$ denote the
+        L2-normalized image and text embeddings for pair $i$. Because both embeddings are unit
+        vectors, their dot product equals their cosine similarity. The model scales these
+        similarities by a learnable temperature $\tau$ and computes a symmetric cross-entropy
+        loss over the resulting $N \times N$ logit matrix:
+      </p>
+
+      $$\mathcal{L} = -\frac{1}{2N} \sum_{i=1}^{N} \left[
+        \log \frac{\exp(\mathbf{I}_i \cdot \mathbf{T}_i \,/\, \tau)}
+                  {\sum_{j=1}^{N} \exp(\mathbf{I}_i \cdot \mathbf{T}_j \,/\, \tau)}
+        \;+\;
+        \log \frac{\exp(\mathbf{T}_i \cdot \mathbf{I}_i \,/\, \tau)}
+                  {\sum_{j=1}^{N} \exp(\mathbf{T}_j \cdot \mathbf{I}_i \,/\, \tau)}
+      \right]$$
+
+      <p>
+        The first term is the <strong>image-to-text</strong> direction: for each image $i$,
+        treat its paired caption as the single correct class among all $N$ captions in the
+        batch. The second term is the <strong>text-to-image</strong> direction: the same logic
+        applied in reverse. Averaging the two makes the loss <em>symmetric</em>.
+      </p>
+
+      <div class="callout idea">
+        <div class="callout-label">Why batch size matters</div>
+        Each item in the batch serves as a negative for every other item. A larger batch
+        means harder negatives and a stronger training signal. This is why the original CLIP
+        paper uses a batch size of 32,768. Our reproduction uses 256, which limits the
+        negatives per step but is tractable on a single GPU.
+      </div>
+
+      <!-- ---- 4. Data & Training ------------------------------------ -->
+      <h2 id="data">
+        Dataset &amp; Training Setup
+      </h2>
+
+      <p>
+        Flickr30k <a href="#ref-flickr" class="cite">[2]</a> contains 31,014 images, each with
+        5 independently-written human captions — 155,070 pairs in total. I hold out 1,000 images
+        for validation and train on the remaining ~30,000. During training, one caption is sampled
+        randomly per image per step, so the model sees different descriptions of the same scene
+        across epochs, improving diversity without increasing dataset size.
+        Images are randomly resized and cropped to 224 $\times$ 224, horizontally flipped with 50%
+        probability, color-jittered, and normalized to ImageNet statistics for the pretrained ResNet.
+      </p>
+
+      <figure>
+        <img src="click_ex.png" alt="Flickr30k example images with captions" />
+        <figcaption>
+          Example images from Flickr30k, each paired with one of its five human-written captions.
+          The diversity of descriptions for the same image is what makes caption sampling
+          an effective form of data augmentation.
+        </figcaption>
+      </figure>
+
+      Below find training details.
+
+      <table class="arch-table">
+        <thead>
+          <tr><th>Hyperparameter</th><th>Value</th></tr>
+        </thead>
+        <tbody>
+          <tr><td>Embedding dim</td><td>256 (small) / 512 (large)</td></tr>
+          <tr><td>Batch size</td><td>256</td></tr>
+          <tr><td>Epochs</td><td>40</td></tr>
+          <tr><td>Optimizer</td><td>AdamW ($\beta_1 = 0.9$, $\beta_2 = 0.98$)</td></tr>
+          <tr><td>LR</td><td>5e-4 (small) / 3e-4 (large) + Cosine annealing</td></tr>
+          <tr><td>Weight decay</td><td>0.1</td></tr>
+          <tr><td>Hardware</td><td>T4 (small) / A100 (large) via Modal</td></tr>
+          <tr><td>Training time</td><td> ~45 min (small) / ~1.5 hrs (large)</td></tr>
+        </tbody>
+      </table>
+
+      <p>
+        The training and validation loss curves below show both models converging steadily
+        over 40 epochs. The loss decreasing corresponds directly to the similarity matrix
+        becoming more diagonal.
+      </p>
+
+      <div class="sim-mat-row" style="grid-template-columns: repeat(2, 1fr);">
+        <div class="sim-mat-cell">
+          <img src="train_plot.png" alt="Training loss curve" />
+          <p><strong>Training loss</strong> over 40 epochs</p>
+        </div>
+        <div class="sim-mat-cell">
+          <img src="val_plot.png" alt="Validation loss curve" />
+          <p><strong>Validation loss</strong> over 40 epochs</p>
+        </div>
+      </div>
+
+      <!-- ---- 5. Results -------------------------------------------- -->
+      <h2 id="results">
+        Results
+      </h2>
+
+      <p>
+        The primary evaluation metric for retrieval is <strong>Recall@$k$</strong> (R@$k$):
+        given a text query, is the correct image ranked in the top $k$ results out of 1,000
+        candidates? R@1 is the strictest since the model must pick the exact right image first.
+        R@5 and R@10 are more forgiving, reflecting real-world use where a user scrolls
+        through a few results.
+      </p>
+
+      <h3>Small model — T5-small + ResNet-18</h3>
+
+      <div class="results-grid">
+        <div class="result-card">
+          <div class="metric">1.9%</div>
+          <div class="metric-label">R@1</div>
+          <div class="metric-sub">Image → Text</div>
+        </div>
+        <div class="result-card">
+          <div class="metric">10.0%</div>
+          <div class="metric-label">R@5</div>
+          <div class="metric-sub">Image → Text</div>
+        </div>
+        <div class="result-card">
+          <div class="metric">17.2%</div>
+          <div class="metric-label">R@10</div>
+          <div class="metric-sub">Image → Text</div>
+        </div>
+      </div>
+
+      <h3>Large model — DistilBERT + ResNet-50</h3>
+
+      <div class="results-grid">
+        <div class="result-card">
+          <div class="metric">5.2%</div>
+          <div class="metric-label">R@1</div>
+          <div class="metric-sub">Image → Text</div>
+        </div>
+        <div class="result-card">
+          <div class="metric">20.5%</div>
+          <div class="metric-label">R@5</div>
+          <div class="metric-sub">Image → Text</div>
+        </div>
+        <div class="result-card">
+          <div class="metric">32.7%</div>
+          <div class="metric-label">R@10</div>
+          <div class="metric-sub">Image → Text</div>
+        </div>
+      </div>
+
+      <p>
+        The large model improves meaningfully across all metrics — R@1 goes from 1.9% to
+        5.2%, a <strong>2.7$\times$ improvement</strong> just from scaling the encoders. Both are
+        well below the original CLIP paper <a href="#ref-clip" class="cite">[1]</a>, which
+        achieves R@1 = 88.0% on Flickr30k with a ViT-B/32 trained on 400M pairs. I don't
+        expect to match that since they have $13{,}000\times$ more data, a larger model, hundreds
+        of GPUs, and weeks of training. The more meaningful comparison is random chance: with
+        1,000 candidates, random retrieval gives R@1 = 0.1%. The large model's 5.2% is
+        <strong>52$\times$ better than random</strong>, confirming the embedding space is learning a structure.
+      </p>
+
+      <div class="callout idea">
+        <div class="callout-label">Context</div>
+        The original CLIP paper trained for weeks across hundreds of GPUs on 400 million
+        image-text pairs. This reproduction trained for ~4–6 hours on a single GPU on 30,000
+        pairs — roughly \$3–\$5 of compute. This shows just how important model capacity and dataset size are for these models, and helps me appreciate training at scale.
+      </div>
+
+      <!-- ---- 6. Similarity matrix ----------------------------------
+      <h2 id="similarity">
+        Embedding Space
+      </h2>
+
+      <p>
+        The similarity matrix was already covered above as part of the training walkthrough —
+        see the <a href="#training-matrices">three snapshots</a> showing how the diagonal emerges over the
+        course of training. By the end of 40 epochs the positive pairs (diagonal) are clearly
+        brighter than the off-diagonal negatives, which is exactly what the contrastive loss
+        is optimizing for. The separation isn't perfect — with only 30,000 training pairs
+        there are hard negatives that the model can't fully disambiguate — but the structure
+        is real and measurable.
+      </p>
+
+      <p>
+        Another way to see the structure is to project the 512-dimensional embeddings down
+        to 2D using t-SNE. If the model has learned meaningful representations, semantically
+        similar images and captions should cluster together — and matched pairs should land
+        near each other despite coming from completely different modalities.
+      </p>
+
+      <figure>
+        <img src="tsne_embeddings.png"
+             alt="t-SNE of CLIP embedding space — image and text embeddings colored by semantic category" />
+        <figcaption>
+          t-SNE projection of 1,000 image embeddings (circles) and their paired text
+          embeddings (diamonds), colored by semantic category inferred from captions.
+          Matched pairs are connected by gray lines. Sports cluster away from food, which
+          clusters away from nature — the model has learned a geometry that reflects
+          real-world semantic relationships, purely from contrastive training on image-caption pairs.
+        </figcaption>
+      </figure> -->
+
+      <!-- ---- 7. Retrieval examples --------------------------------- -->
+      <h2 id="retrieval">
+        Retrieval Examples
+      </h2>
+
+      <p>
+        Given a text query, the model encodes it and retrieves the top-$k$ most similar
+        images by cosine similarity across all 31,000 Flickr30k images. These results are
+        from the large model (DistilBERT + ResNet-50). The top result (green border) is
+        consistently relevant — the model has learned that images of active dogs (and a horse?) go with dog language, large groups of people go with crowded streets, and it can recognize a child riding a bike.
+      </p>
+
+      <figure>
+        <img src="results/large/t2i_a_dog_playing_in_the_snow.png"
+             alt="Query: a dog playing in the snow" />
+        <figcaption><em>"a dog playing in the snow"</em></figcaption>
+      </figure>
+
+      <figure>
+        <img src="results/large/t2i_a_crowded_city_street_at_night.png"
+             alt="Query: a crowded city street at night" />
+        <figcaption><em>"a crowded city street at night"</em></figcaption>
+      </figure>
+
+      <figure>
+        <img src="results/large/t2i_a_child_riding_a_bicycle.png"
+             alt="Query: a child riding a bicycle" />
+        <figcaption><em>"a child riding a bicycle"</em></figcaption>
+      </figure>
+
+      <!-- ---- 8. Failure cases ------------------------------------- -->
+      <h2 id="failures">
+        Zero-Shot Classification &amp; Failure Cases
+      </h2>
+
+      <p>
+        Beyond retrieval, CLIP's shared embedding space enables zero-shot classification:
+        encode each class label as <em>"a photo of a {class}"</em>, then find the nearest
+        label to a query image, with no fine-tuning required. I tested both models on
+        CIFAR-100 (100 fine-grained classes) and Food-101 (101 food categories).
+      </p>
+
+      <!-- <figure>
+        <img src="results/zeroshot/comparison.png"
+             alt="Zero-shot classification accuracy: small vs large model" />
+        <figcaption>
+          Zero-shot Top-1 and Top-5 accuracy on CIFAR-100 and Food-101.
+          The large model consistently outperforms the small model.
+          Food-101 is easier — food categories are visually distinct and
+          the prompts map cleanly to the training distribution.
+        </figcaption>
+      </figure> -->
+
+      <p>
+        The per-class breakdown reveals where the model succeeds and fails.
+        On Food-101, visually distinctive categories (pizza, sushi, steak) score well.
+        On CIFAR-100, fine-grained categories like <em>shrew</em> vs <em>mouse</em>
+        or <em>baby</em> vs <em>boy</em> are nearly impossible. The 32$\times$32 CIFAR
+        images lose too much detail, and the model was never trained on anything like them.
+      </p>
+
+      <figure>
+        <img src="results/zeroshot/large_food101_examples.png"
+             alt="Food-101 zero-shot examples — successes and failures" />
+        <figcaption><strong>Food-101</strong> — large model. Green border = correct, red = incorrect.</figcaption>
+      </figure>
+
+      <figure>
+        <img src="results/zeroshot/large_cifar100_examples.png"
+             alt="CIFAR-100 zero-shot examples — successes and failures" />
+        <figcaption><strong>CIFAR-100</strong> — large model. Fine-grained categories on 32×32 images are much harder.</figcaption>
+      </figure>
+
+      <!-- ---- 9. Takeaways ----------------------------------------- -->
+      <h2 id="takeaways">
+        Takeaways
+      </h2>
+
+      <p>
+        The result that surprised me most: <strong>it works after 45 min. to 1hr. of training.</strong> Training on
+        30,000 image-text pairs (a small dataset that fits in a few gigabytes that you can download
+        in minutes) produces a model that can retrieve semantically relevant images from text
+        queries. It can also generalize to zero-shot classification on datasets it never saw and produce
+        a structured embedding space. That is not obvious and the contrastive objective is remarkably
+        efficient at squeezing signal out of limited data.
+      </p>
+
+      <p>
+        The second surprise was how simple the implementation is. The core of CLIP fits in
+        about 30 lines of Python: take two pretrained encoders, a linear projection, L2
+        normalization, a dot product, and a cross-entropy loss. There is no custom
+        architecture and no complex pipeline. The pretrained encoders
+        (ResNet and DistilBERT/T5) do the heavy lifting; the contrastive training just
+        teaches them to agree. Plug in better encoders and
+        more data and the same code scales up.
+      </p>
+
+      <p>
+        What the numbers also make clear is that <strong>data is the real bottleneck</strong>,
+        not model capacity. Going from ResNet-18 to ResNet-50 and T5-small to DistilBERT gave
+        a 2.7$\times$ improvement in R@1. But the gap to the original CLIP (which uses a similar
+        model size) is 17$\times$ in R@1. That gap is almost entirely explained by training on
+        30K pairs vs 400M. More data would do more than any architectural change.
+      </p>
+
+      <div class="callout">
+        <div class="callout-label">What I'd try next</div>
+        Training on CC3M (~3M pairs) with the ViT-S/16 + MPNet architecture is already
+        underway. Beyond that: a larger batch size (more negatives per step is one of the
+        highest-leverage changes), a ViT-B/16 image encoder pretrained on ImageNet-21k,
+        and eventually adding a text decoder on top of the image encoder to generate
+        captions — which is how BLIP and related models work.
+      </div>
+
+      <h3>Holistic Takeaways</h3>
+
+      <p>
+        This might be my new favorite way to understand a paper. Reading CLIP gave me a clean
+        mental model of what it does. Training it, watching the similarity matrix
+        go from noise to structure, querying it with real text, and seeing it retrieve the right
+        images and fail on hard cases gave me insight. I learned <em>why</em> it works and exactly where it breaks down and closed this gap in my mental model.
+      </p>
+
+      <p>
+        The tooling available today makes this surprisingly accessible. A GPU, a few dollars
+        of cloud compute, some AI assistance, and a day or two is enough to reproduce the core of a
+        landmark paper. That wasn't true five years ago. If you've been sitting on a paper
+        you want to understand more deeply, the best next step is probably to just build it.
+        Code available at <a href="https://github.com/ehersch" target="_blank">github.com/ehersch</a>.
+      </p>
+
+    </article>
+
+    <!-- ================================================================
+         REFERENCES
+    ================================================================ -->
+    <section class="references">
+      <h2 style="font-size:18px;color:var(--text-muted);font-weight:500;margin-bottom:24px;margin-top:0;">
+        References
+      </h2>
+      <ol class="ref-list">
+        <li id="ref-clip">
+          Radford, A., Kim, J. W., Hallacy, C., Ramesh, A., Goh, G., Agarwal, S., ... &amp; Sutskever, I. (2021).
+          <strong>Learning Transferable Visual Models From Natural Language Supervision.</strong>
+          <em>ICML 2021.</em>
+          <a href="https://arxiv.org/abs/2103.00020" target="_blank">arXiv:2103.00020</a>
+        </li>
+        <li id="ref-flickr">
+          Young, P., Lai, A., Hodosh, M., &amp; Hockenmaier, J. (2014).
+          <strong>From image descriptions to visual denotations: New similarity metrics for semantic inference over event descriptions.</strong>
+          <em>TACL, 2, 67–78.</em>
+          <a href="https://aclanthology.org/Q14-1006/" target="_blank">ACL Anthology</a>
+        </li>
+        <li id="ref-resnet">
+          He, K., Zhang, X., Ren, S., &amp; Sun, J. (2016).
+          <strong>Deep Residual Learning for Image Recognition.</strong>
+          <em>CVPR 2016.</em>
+          <a href="https://arxiv.org/abs/1512.03385" target="_blank">arXiv:1512.03385</a>
+          <span class="ref-note"> — ResNet-18 and ResNet-50 used as image encoders</span>
+        </li>
+        <li id="ref-distilbert">
+          Sanh, V., Debut, L., Chaumond, J., &amp; Wolf, T. (2019).
+          <strong>DistilBERT, a distilled version of BERT: smaller, faster, cheaper and lighter.</strong>
+          <em>NeurIPS 2019 Workshop.</em>
+          <a href="https://arxiv.org/abs/1910.01108" target="_blank">arXiv:1910.01108</a>
+        </li>
+        <li id="ref-t5">
+          Raffel, C., Shazeer, N., Roberts, A., Lee, K., Narang, S., Matena, M., ... &amp; Liu, P. J. (2020).
+          <strong>Exploring the Limits of Transfer Learning with a Unified Text-to-Text Transformer.</strong>
+          <em>JMLR, 21(140), 1–67.</em>
+          <a href="https://arxiv.org/abs/1910.10683" target="_blank">arXiv:1910.10683</a>
+          <span class="ref-note"> — T5-small encoder used as text encoder in small model</span>
+        </li>
+      </ol>
+    </section>
+
+    <!-- ================================================================
+         FOOTER
+    ================================================================ -->
+    <footer>
+      <p>
+        Written by <a href="https://ehersch.github.io/" target="_blank">Ethan Hersch</a> &nbsp;·&nbsp;
+        <a href="https://github.com/ehersch" target="_blank">GitHub</a>
+      </p>
+    </footer>
+
+  </div><!-- /container -->
+
+  <script src="assets/js/main.js"></script>
+</body>
+</html>
