@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "blog-preview",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["serve", "docs", "-p", "8765", "-n"],
+      "port": 8765
+    }
+  ]
+}
